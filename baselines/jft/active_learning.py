@@ -59,6 +59,8 @@ import ood_utils  # local file import from baselines.jft
 import preprocess_utils  # local file import from baselines.jft
 import train_utils  # local file import from baselines.jft
 
+import wandb
+
 config_flags.DEFINE_config_file(
     "config", None, "Training configuration.", lock_config=False)
 flags.DEFINE_enum(
@@ -355,6 +357,10 @@ def finetune(*,
 
   best_opt_accuracy = -1
   best_step = 1
+
+  train_accuracies = []
+  val_accuracies = []
+
   for current_step, train_batch, lr_repl in zip(
       tqdm.trange(1, total_steps + 1), iter_ds, lr_iter):
     opt_repl, _, rngs_loop, _ = update_fn(opt_repl, lr_repl,
@@ -367,6 +373,9 @@ def finetune(*,
       val_accuracy = get_accuracy(
           evaluation_fn=evaluation_fn, opt_repl=opt_repl, ds=val_ds)
       print(f"Current accuracy - train:{train_accuracy}, val: {val_accuracy}")
+      train_accuracies.append((current_step, train_accuracy))
+      val_accuracies.append((current_step, val_accuracy))
+
       if val_accuracy >= best_opt_accuracy:
         best_step = current_step
         best_opt_accuracy = val_accuracy
@@ -379,7 +388,13 @@ def finetune(*,
 
   # best_opt_repl could be unassigned, but we should error out then
 
-  return best_opt_repl, rngs_loop
+  info = dict(
+      best_val_accuracy=best_opt_accuracy,
+      best_step=best_step,
+      train_accuracies=train_accuracies,
+      val_accuracies=val_accuracies)
+
+  return best_opt_repl, rngs_loop, info
 
 
 def make_init_fn(model, image_shape, local_batch_size, config):
@@ -533,6 +548,11 @@ def main(config):
   print(config)
   acquisition_method = config.get("acquisition_method")
 
+  # This used to be a hack for speed things up, but also we OOM without it now...
+  config.pp_eval = config.pp_eval.replace("384", "224")
+  config.pp_train = config.pp_train.replace("384", "224")
+  config.grad_accum_steps = 8  # From ViT repo as sensible value - OoM otherwise
+
   # Keep the ID for filtering the pool set
   keep_id = 'keep(["image", "labels", "id"])'
   # HACK: assumes the keep is at the end
@@ -660,6 +680,9 @@ def main(config):
   else:
     initial_training_set_batch_ids = []
 
+  wandb.summary["initial_training_set_batch_ids"] = list(
+      initial_training_set_batch_ids)
+
   # NOTE: if we could `enumerate` before `filter` in `create_dataset` of CLU
   # then this dataset creation could be simplified.
   # https://github.com/google/CommonLoopUtils/blob/main/clu/deterministic_data.py#L340
@@ -679,7 +702,7 @@ def main(config):
   rngs_loop = flax_utils.replicate(rng_loop)
 
   # NOTE: it's VITAL train_ds_rng is used for all train_ds creations
-  # TODO(andreas): update comment: why is it vital?
+  # TODO(andreas): fix the comment to explain instead of instilling fear :D
   rng, train_ds_rng = jax.random.split(rng)
 
   while True:
@@ -732,7 +755,7 @@ def main(config):
       lr_fn = lambda x: config.lr.base
 
       early_stopping_patience = config.get("early_stopping_patience", 15)
-      current_opt_repl, rngs_loop = finetune(
+      current_opt_repl, rngs_loop, info = finetune(
           update_fn=update_fn,
           opt_repl=current_opt_repl,
           lr_fn=lr_fn,
@@ -744,6 +767,32 @@ def main(config):
           evaluation_fn=evaluation_fn,
           early_stopping_patience=early_stopping_patience)
 
+      train_accuracy_table = wandb.Table(
+          data=info["train_accuracies"],
+          columns=["batch step", "train_accuracy"])
+      val_accuracy_table = wandb.Table(
+          data=info["val_accuracies"], columns=["batch step", "val_accuracy"])
+      wandb.log(
+          {
+              "finetune/train_accuracy":
+                  wandb.plot.line(
+                      train_accuracy_table,
+                      "batch step",
+                      "train accuracy",
+                      title="Training Accuracy"),
+              "finetune/val_accuracy":
+                  wandb.plot.line(
+                      val_accuracy_table,
+                      "batch step",
+                      "val accuracy",
+                      title="Validation Accuracy"),
+              "finetune/best_step":
+                  info["best_step"],
+              "finetune/best_val_accuracy":
+                  info["best_val_accuracy"]
+          },
+          step=current_train_ds_length)
+
     test_accuracy = get_accuracy(
         evaluation_fn=evaluation_fn, opt_repl=current_opt_repl, ds=test_ds)
 
@@ -751,6 +800,7 @@ def main(config):
 
     test_accuracies.append(test_accuracy)
     training_sizes.append(current_train_ds_length)
+    wandb.log(dict(test_accuracy=test_accuracy), step=current_train_ds_length)
 
     pool_ids, pool_outputs, _, pool_masks = get_ids_logits_masks(
         model=model,
@@ -787,7 +837,7 @@ def main(config):
     else:
       raise ValueError("Acquisition method not found.")
 
-    acquisition_batch_ids, _ = select_acquisition_batch_indices(
+    acquisition_batch_ids, acquisition_batch_scores = select_acquisition_batch_indices(
         acquisition_batch_size=config.get("acquisition_batch_size", 10),
         scores=pool_scores,
         ids=pool_ids,
@@ -795,6 +845,13 @@ def main(config):
 
     train_subset_data_builder.subset_ids[config.train_split].update(
         acquisition_batch_ids)
+
+    acquistion_batch_table = wandb.Table(
+        data=list(zip(acquisition_batch_ids, acquisition_batch_scores)),
+        columns=["Id", "Score"])
+    wandb.log(
+        dict(acquisition_batch=acquistion_batch_table,),
+        step=current_train_ds_length)
 
   print(f"Final acquired training ids: "
         f"{train_subset_data_builder.subset_ids[config.train_split]}"
@@ -815,6 +872,13 @@ if __name__ == "__main__":
     config.max_training_set_size = FLAGS.max_training_set_size
     config.initial_training_set_size = FLAGS.initial_training_set_size
     config.acquisition_batch_size = FLAGS.acquisition_batch_size
+
+    wandb.init(
+        project="rdl-active-learning",
+        entity="oatml-andreas-kirsch",
+    )
+    wandb.config.update(flags.FLAGS)
+
     main(config)
 
   app.run(_main)  # Ignore the returned values from `main`.
