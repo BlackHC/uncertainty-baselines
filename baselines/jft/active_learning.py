@@ -873,11 +873,21 @@ if __name__ == "__main__":
     config.initial_training_set_size = FLAGS.initial_training_set_size
     config.acquisition_batch_size = FLAGS.acquisition_batch_size
 
+    wandb_config = dict(
+        acquisition_method=FLAGS.acquisition_method,
+        max_training_set_size=FLAGS.max_training_set_size,
+        initial_training_set_size=FLAGS.initial_training_set_size,
+        acquisition_batch_size=FLAGS.acquisition_batch_size,
+    )
+
     wandb.init(
         project="rdl-active-learning",
         entity="oatml-andreas-kirsch",
-    )
-    wandb.config.update(flags.FLAGS)
+        config=wandb_config)
+
+    if jax.device_count() < 8:
+      raise RuntimeError("Expected >=8 devices, only found ",
+                         jax.device_count())
 
     main(config)
 
