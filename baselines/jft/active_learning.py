@@ -78,6 +78,9 @@ flags.DEFINE_integer(
     "initial_training_set_size",
     default=None,
     help="Initial training set size.")
+flags.DEFINE_integer(
+    "early_stopping_patience", default=None, help="Early stopping patience.")
+flags.DEFINE_integer("seed", default=None, help="Random seed.")
 
 FLAGS = flags.FLAGS
 
@@ -876,13 +879,16 @@ if __name__ == "__main__":
     config.max_training_set_size = FLAGS.max_training_set_size
     config.initial_training_set_size = FLAGS.initial_training_set_size
     config.acquisition_batch_size = FLAGS.acquisition_batch_size
+    config.early_stopping_patience = FLAGS.early_stopping_patience
+    config.seed = FLAGS.seed
 
     wandb_config = dict(
         acquisition_method=FLAGS.acquisition_method,
         max_training_set_size=FLAGS.max_training_set_size,
         initial_training_set_size=FLAGS.initial_training_set_size,
         acquisition_batch_size=FLAGS.acquisition_batch_size,
-    )
+        early_stopping_patience=FLAGS.early_stopping_patience,
+        seed=FLAGS.seed)
 
     wandb.init(
         project="rdl-active-learning",
