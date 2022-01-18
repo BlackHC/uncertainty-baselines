@@ -816,24 +816,28 @@ def main(config):
     elif acquisition_method == "margin":
       pool_scores = get_margin_scores(pool_outputs, pool_masks)
     elif acquisition_method == "density":
-      feature_train_ds = input_utils.get_data(
-          dataset=train_subset_data_builder,
-          split=config.train_split,
-          rng=train_ds_rng,
-          process_batch_size=local_batch_size,
-          preprocess_fn=preprocess_spec.parse(
-              spec=id_pp_eval, available_ops=preprocess_utils.all_ops()),
-          shuffle=False,
-          drop_remainder=False,
-          prefetch_size=config.get("prefetch_to_host", 2),
-          num_epochs=1)
+      if current_train_ds_length > 0:
+        feature_train_ds = input_utils.get_data(
+            dataset=train_subset_data_builder,
+            split=config.train_split,
+            rng=train_ds_rng,
+            process_batch_size=local_batch_size,
+            preprocess_fn=preprocess_spec.parse(
+                spec=id_pp_eval, available_ops=preprocess_utils.all_ops()),
+            shuffle=False,
+            drop_remainder=False,
+            prefetch_size=config.get("prefetch_to_host", 2),
+            num_epochs=1)
 
-      pool_scores = get_density_scores(
-          model=model,
-          opt_repl=current_opt_repl,
-          train_ds=feature_train_ds,
-          pool_pre_logits=pool_outputs,
-          pool_masks=pool_masks)
+        pool_scores = get_density_scores(
+            model=model,
+            opt_repl=current_opt_repl,
+            train_ds=feature_train_ds,
+            pool_pre_logits=pool_outputs,
+            pool_masks=pool_masks)
+      else:
+        rng, rng_loop = jax.random.split(rng, 2)
+        pool_scores = get_uniform_scores(pool_masks, rng)
     else:
       raise ValueError("Acquisition method not found.")
 
